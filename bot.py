@@ -13,6 +13,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import ChatPermissions, Message
 from dotenv import load_dotenv
@@ -28,6 +29,7 @@ router = Router()
 
 HELP = """<b>Модерация</b>
 /ban [@username] [причина] — бан
+/ban [telegram_id] [причина] — бан по ID
 /unban id — разбан
 /mute [30m|2h|3d] [причина] — мут
 /unmute — снять мут
@@ -122,7 +124,10 @@ async def require_target(message: Message):
 
 
 async def protect_admin(message: Message, bot: Bot, user) -> bool:
-    member = await bot.get_chat_member(message.chat.id, user.id)
+    try:
+        member = await bot.get_chat_member(message.chat.id, user.id)
+    except TelegramBadRequest:
+        return True
     if member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
         await message.answer("Админов не трогаю.")
         return False
@@ -138,6 +143,11 @@ def username_arguments(args: str | None) -> tuple[str | None, str | None]:
     return (match.group(1).lower(), match.group(2) or "") if match else (None, None)
 
 
+def id_arguments(args: str | None) -> tuple[int | None, str | None]:
+    match = re.fullmatch(r"(\d{5,20})(?:\s+(.+))?", (args or "").strip(), flags=re.DOTALL)
+    return (int(match.group(1)), match.group(2) or "") if match else (None, None)
+
+
 def known_user(chat_id: int, username: str) -> StoredUser | None:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
@@ -147,19 +157,31 @@ def known_user(chat_id: int, username: str) -> StoredUser | None:
     return StoredUser(id=row[0], full_name=row[1]) if row else None
 
 
+def known_user_by_id(chat_id: int, user_id: int) -> StoredUser | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT user_id, full_name FROM known_users WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id),
+        ).fetchone()
+    return StoredUser(id=row[0], full_name=row[1]) if row else None
+
+
 async def ban_target(message: Message, command_args: str | None):
     replied_user = target(message)
     if replied_user:
         return replied_user, command_args
     username, ban_reason = username_arguments(command_args)
-    if not username:
-        await message.answer("Ответьте на сообщение участника или используйте: /ban @username [причина]")
-        return None, None
-    user = known_user(message.chat.id, username)
-    if not user:
-        await message.answer("Не знаю этого пользователя. Он должен хотя бы раз написать в этом чате.")
-        return None, None
-    return user, ban_reason
+    if username:
+        user = known_user(message.chat.id, username)
+        if not user:
+            await message.answer("Не знаю этого пользователя. Он должен хотя бы раз написать в этом чате.")
+            return None, None
+        return user, ban_reason
+    user_id, ban_reason = id_arguments(command_args)
+    if user_id:
+        return known_user_by_id(message.chat.id, user_id) or StoredUser(id=user_id, full_name=str(user_id)), ban_reason
+    await message.answer("Ответьте на сообщение или используйте: /ban @username [причина], /ban telegram_id [причина]")
+    return None, None
 
 
 def mute_arguments(args: str | None) -> tuple[timedelta | None, str | None]:
