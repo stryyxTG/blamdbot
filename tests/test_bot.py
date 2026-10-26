@@ -31,6 +31,14 @@ class ModerationHelpersTests(unittest.TestCase):
         self.assertIn("&lt;admin&gt; &amp; friends", display(User()))
         self.assertEqual(reason("<b>test</b>"), "&lt;b&gt;test&lt;/b&gt;")
 
+    def test_username_is_preferred_over_full_name(self):
+        class User:
+            id = 42
+            full_name = "Full Name"
+            username = "cool_user"
+
+        self.assertEqual(display(User()), "@cool_user")
+
     def test_ban_username_and_multiline_reason(self):
         self.assertEqual(
             username_arguments("@Some_User\nоскорбления"),

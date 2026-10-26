@@ -28,17 +28,18 @@ RULES = "Правила ещё не настроены."
 router = Router()
 
 HELP = """<b>Модерация</b>
-/ban [@username] [причина] — бан
-/ban [telegram_id] [причина] — бан по ID
-/unban id — разбан
-/mute [30m|2h|3d] [причина] — мут
-/unmute — снять мут
-/kick [причина] — кик
-/warn [причина] — предупреждение
-/unwarn — снять предупреждение
-/warnings — список предупреждений
-/purge — удалить сообщения от реплая до команды
-/rules — правила"""
+/ban — ответом на сообщение
+/ban @username [причина]
+/ban telegram_id [причина]
+/unban telegram_id
+/mute [30m|2h|3d] [причина]
+/unmute — ответом на сообщение
+/kick [причина] — ответом на сообщение
+/warn [причина] — ответом на сообщение
+/unwarn — ответом на сообщение
+/warnings — ответом на сообщение
+/purge — ответом на первое сообщение
+/rules"""
 
 
 def init_db() -> None:
@@ -66,6 +67,7 @@ def init_db() -> None:
 class StoredUser:
     id: int
     full_name: str
+    username: str | None = None
     is_bot: bool = False
 
 
@@ -78,6 +80,9 @@ def target(message: Message):
 
 
 def display(user) -> str:
+    username = getattr(user, "username", None)
+    if username:
+        return f"@{html.escape(username)}"
     name = html.escape(user.full_name or str(user.id))
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
@@ -151,19 +156,19 @@ def id_arguments(args: str | None) -> tuple[int | None, str | None]:
 def known_user(chat_id: int, username: str) -> StoredUser | None:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT user_id, full_name FROM known_users WHERE chat_id = ? AND lower(username) = ? ORDER BY updated_at DESC LIMIT 1",
+            "SELECT user_id, full_name, username FROM known_users WHERE chat_id = ? AND lower(username) = ? ORDER BY updated_at DESC LIMIT 1",
             (chat_id, username.lower()),
         ).fetchone()
-    return StoredUser(id=row[0], full_name=row[1]) if row else None
+    return StoredUser(id=row[0], full_name=row[1], username=row[2]) if row else None
 
 
 def known_user_by_id(chat_id: int, user_id: int) -> StoredUser | None:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT user_id, full_name FROM known_users WHERE chat_id = ? AND user_id = ?",
+            "SELECT user_id, full_name, username FROM known_users WHERE chat_id = ? AND user_id = ?",
             (chat_id, user_id),
         ).fetchone()
-    return StoredUser(id=row[0], full_name=row[1]) if row else None
+    return StoredUser(id=row[0], full_name=row[1], username=row[2]) if row else None
 
 
 async def ban_target(message: Message, command_args: str | None):
@@ -215,7 +220,7 @@ async def ban(message: Message, bot: Bot, command: CommandObject):
     if not user or not await protect_admin(message, bot, user):
         return
     await bot.ban_chat_member(message.chat.id, user.id)
-    await message.answer(f"{display(user)} — бан. {reason(ban_reason)}")
+    await message.answer(f"Бан\nУчастник: {display(user)}\nПричина: {reason(ban_reason)}")
 
 
 @router.message(Command("unban"))
@@ -225,7 +230,8 @@ async def unban(message: Message, bot: Bot, command: CommandObject):
     with suppress(ValueError, TypeError):
         user_id = int((command.args or "").strip())
         await bot.unban_chat_member(message.chat.id, user_id, only_if_banned=True)
-        await message.answer("Разбанен.")
+        user = known_user_by_id(message.chat.id, user_id) or StoredUser(id=user_id, full_name=str(user_id))
+        await message.answer(f"Разбан\nУчастник: {display(user)}")
         return
     await message.answer("Использование: /unban <telegram_id>")
 
@@ -245,7 +251,7 @@ async def mute(message: Message, bot: Bot, command: CommandObject):
     await bot.restrict_chat_member(message.chat.id, user.id, ChatPermissions(can_send_messages=False), until_date=until)
     raw_duration = re.match(r"\d{1,4}\s*[mhd]", (command.args or "").strip(), re.IGNORECASE)
     duration_label = raw_duration.group(0).replace(" ", "") if raw_duration else "1h"
-    await message.answer(f"{display(user)} — мут на {duration_label}. {reason(mute_reason)}")
+    await message.answer(f"Мут\nУчастник: {display(user)}\nСрок: {duration_label}\nПричина: {reason(mute_reason)}")
 
 
 @router.message(Command("unmute"))
@@ -256,7 +262,7 @@ async def unmute(message: Message, bot: Bot):
     if not user or not await protect_admin(message, bot, user):
         return
     await bot.restrict_chat_member(message.chat.id, user.id, ChatPermissions(can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True, can_send_videos=True, can_send_video_notes=True, can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True, can_add_web_page_previews=True, can_change_info=True, can_invite_users=True, can_pin_messages=True))
-    await message.answer(f"{display(user)} — мут снят.")
+    await message.answer(f"Мут снят\nУчастник: {display(user)}")
 
 
 @router.message(Command("kick"))
@@ -268,7 +274,7 @@ async def kick(message: Message, bot: Bot, command: CommandObject):
         return
     await bot.ban_chat_member(message.chat.id, user.id)
     await bot.unban_chat_member(message.chat.id, user.id)
-    await message.answer(f"{display(user)} — кик. {reason(command.args)}")
+    await message.answer(f"Кик\nУчастник: {display(user)}\nПричина: {reason(command.args)}")
 
 
 @router.message(Command("warn"))
@@ -283,9 +289,9 @@ async def warn(message: Message, bot: Bot, command: CommandObject):
         count = conn.execute("SELECT COUNT(*) FROM warnings WHERE chat_id = ? AND user_id = ?", (message.chat.id, user.id)).fetchone()[0]
     if count >= WARN_LIMIT:
         await bot.ban_chat_member(message.chat.id, user.id)
-        await message.answer(f"{display(user)} — {count}/{WARN_LIMIT}, бан.")
+        await message.answer(f"Бан\nУчастник: {display(user)}\nПричина: {count}/{WARN_LIMIT} предупреждений")
     else:
-        await message.answer(f"{display(user)} — предупреждение {count}/{WARN_LIMIT}. {reason(command.args)}")
+        await message.answer(f"Предупреждение {count}/{WARN_LIMIT}\nУчастник: {display(user)}\nПричина: {reason(command.args)}")
 
 
 @router.message(Command("unwarn"))
@@ -299,7 +305,7 @@ async def unwarn(message: Message, bot: Bot):
         row = conn.execute("SELECT id FROM warnings WHERE chat_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1", (message.chat.id, user.id)).fetchone()
         if row:
             conn.execute("DELETE FROM warnings WHERE id = ?", (row[0],))
-    await message.answer("Предупреждение снято." if row else "У него нет предупреждений.")
+    await message.answer(f"Предупреждение снято\nУчастник: {display(user)}" if row else f"У {display(user)} нет предупреждений.")
 
 
 @router.message(Command("warnings"))
@@ -313,7 +319,7 @@ async def warnings(message: Message):
     if not rows:
         await message.answer(f"У {display(user)} нет предупреждений.")
         return
-    await message.answer(f"{display(user)} — {len(rows)}/{WARN_LIMIT}\n" + "\n".join(f"{i + 1}. {r[0]}" for i, r in enumerate(rows)))
+    await message.answer(f"Предупреждения: {len(rows)}/{WARN_LIMIT}\nУчастник: {display(user)}\n\n" + "\n".join(f"{i + 1}. {r[0]}" for i, r in enumerate(rows)))
 
 
 @router.message(Command("purge"))
