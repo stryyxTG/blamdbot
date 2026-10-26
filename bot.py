@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -26,7 +27,7 @@ RULES = "Правила ещё не настроены."
 router = Router()
 
 HELP = """<b>Модерация</b>
-/ban [причина] — бан
+/ban [@username] [причина] — бан
 /unban id — разбан
 /mute [30m|2h|3d] [причина] — мут
 /unmute — снять мут
@@ -48,6 +49,22 @@ def init_db() -> None:
             reason TEXT NOT NULL,
             created_at TEXT NOT NULL
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS known_users (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            full_name TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (chat_id, user_id)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS known_users_username ON known_users(chat_id, username)")
+
+
+@dataclass
+class StoredUser:
+    id: int
+    full_name: str
+    is_bot: bool = False
 
 
 def is_group(message: Message) -> bool:
@@ -116,6 +133,35 @@ def reason(args: str | None) -> str:
     return html.escape(args.strip()) if args and args.strip() else "без причины"
 
 
+def username_arguments(args: str | None) -> tuple[str | None, str | None]:
+    match = re.fullmatch(r"@([A-Za-z0-9_]{5,32})(?:\s+(.+))?", (args or "").strip(), flags=re.DOTALL)
+    return (match.group(1).lower(), match.group(2) or "") if match else (None, None)
+
+
+def known_user(chat_id: int, username: str) -> StoredUser | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT user_id, full_name FROM known_users WHERE chat_id = ? AND lower(username) = ? ORDER BY updated_at DESC LIMIT 1",
+            (chat_id, username.lower()),
+        ).fetchone()
+    return StoredUser(id=row[0], full_name=row[1]) if row else None
+
+
+async def ban_target(message: Message, command_args: str | None):
+    replied_user = target(message)
+    if replied_user:
+        return replied_user, command_args
+    username, ban_reason = username_arguments(command_args)
+    if not username:
+        await message.answer("Ответьте на сообщение участника или используйте: /ban @username [причина]")
+        return None, None
+    user = known_user(message.chat.id, username)
+    if not user:
+        await message.answer("Не знаю этого пользователя. Он должен хотя бы раз написать в этом чате.")
+        return None, None
+    return user, ban_reason
+
+
 def mute_arguments(args: str | None) -> tuple[timedelta | None, str | None]:
     """Возвращает время и причину; None во времени означает неверный формат."""
     text = (args or "").strip()
@@ -143,11 +189,11 @@ async def rules(message: Message):
 async def ban(message: Message, bot: Bot, command: CommandObject):
     if not await require(message, bot, "can_restrict_members"):
         return
-    user = await require_target(message)
+    user, ban_reason = await ban_target(message, command.args)
     if not user or not await protect_admin(message, bot, user):
         return
     await bot.ban_chat_member(message.chat.id, user.id)
-    await message.answer(f"{display(user)} — бан. {reason(command.args)}")
+    await message.answer(f"{display(user)} — бан. {reason(ban_reason)}")
 
 
 @router.message(Command("unban"))
@@ -266,6 +312,29 @@ async def purge(message: Message, bot: Bot):
             deleted += 1
     with suppress(Exception):
         await bot.send_message(message.chat.id, f"Удалено: {deleted}")
+
+
+@router.message()
+async def remember_user(message: Message):
+    """Запоминает участников, чтобы их можно было модерировать по @username."""
+    if not is_group(message) or not message.from_user:
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """INSERT INTO known_users(chat_id, user_id, username, full_name, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                username = excluded.username,
+                full_name = excluded.full_name,
+                updated_at = excluded.updated_at""",
+            (
+                message.chat.id,
+                message.from_user.id,
+                message.from_user.username,
+                message.from_user.full_name,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
 
 
 async def main() -> None:

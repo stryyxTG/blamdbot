@@ -1,7 +1,7 @@
 import unittest
 from datetime import timedelta
 
-from bot import display, mute_arguments, parse_duration, reason
+from bot import display, mute_arguments, parse_duration, reason, username_arguments
 
 
 class ModerationHelpersTests(unittest.TestCase):
@@ -30,6 +30,15 @@ class ModerationHelpersTests(unittest.TestCase):
 
         self.assertIn("&lt;admin&gt; &amp; friends", display(User()))
         self.assertEqual(reason("<b>test</b>"), "&lt;b&gt;test&lt;/b&gt;")
+
+    def test_ban_username_and_multiline_reason(self):
+        self.assertEqual(
+            username_arguments("@Some_User\nоскорбления"),
+            ("some_user", "оскорбления"),
+        )
+
+    def test_invalid_username_target_is_not_parsed(self):
+        self.assertEqual(username_arguments("@bad! причина"), (None, None))
 
 
 if __name__ == "__main__":
